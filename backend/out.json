@@ -1,0 +1,88 @@
+{
+  "language": "tr",
+  "duration": 11.1786875,
+  "segments": [
+    {
+      "start": 0.9799999999999986,
+      "end": 10.68,
+      "text": "Pazartesi, Salı, Çarşamba, Perşembe, Cuma, Cumartesi, Pazar, Pazartesi, Salı, Çarşamba, Perşembe. Bu bir test dosyası.",
+      "words": [
+        {
+          "start": 0.9799999999999986,
+          "end": 1.58,
+          "word": " Pazartesi,"
+        },
+        {
+          "start": 1.74,
+          "end": 2.14,
+          "word": " Salı,"
+        },
+        {
+          "start": 2.28,
+          "end": 2.92,
+          "word": " Çarşamba,"
+        },
+        {
+          "start": 3.12,
+          "end": 3.88,
+          "word": " Perşembe,"
+        },
+        {
+          "start": 3.98,
+          "end": 4.34,
+          "word": " Cuma,"
+        },
+        {
+          "start": 4.58,
+          "end": 5.3,
+          "word": " Cumartesi,"
+        },
+        {
+          "start": 5.48,
+          "end": 5.84,
+          "word": " Pazar,"
+        },
+        {
+          "start": 6.0,
+          "end": 6.72,
+          "word": " Pazartesi,"
+        },
+        {
+          "start": 6.88,
+          "end": 7.24,
+          "word": " Salı,"
+        },
+        {
+          "start": 7.36,
+          "end": 7.92,
+          "word": " Çarşamba,"
+        },
+        {
+          "start": 8.06,
+          "end": 8.78,
+          "word": " Perşembe."
+        },
+        {
+          "start": 9.4,
+          "end": 9.6,
+          "word": " Bu"
+        },
+        {
+          "start": 9.6,
+          "end": 9.78,
+          "word": " bir"
+        },
+        {
+          "start": 9.78,
+          "end": 10.08,
+          "word": " test"
+        },
+        {
+          "start": 10.08,
+          "end": 10.68,
+          "word": " dosyası."
+        }
+      ]
+    }
+  ]
+}
