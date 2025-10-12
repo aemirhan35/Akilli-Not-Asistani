@@ -1,2 +1,2 @@
 # Akilli-Not-Asistani
-stt ve rag kullanarak akıllı not asistani
+stt kullanarak akıllı not asistani
