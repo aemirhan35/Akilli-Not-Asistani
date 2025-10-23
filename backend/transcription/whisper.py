@@ -21,7 +21,7 @@ from functools import lru_cache
 from typing import Dict, Any, Optional
 
 # faster-whisper: pip install faster-whisper
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel     
 
 # pydub + ffmpeg fallback için (opsiyonel ama önerilir)
 # pip install pydub soundfile librosa
