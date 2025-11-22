@@ -1,88 +1,120 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
+import tempfile
 import os
-from openai import OpenAI # API'ye geçiş yapmanız gerekirse diye hazır tutuyoruz
-from .transcription_service.whisper import transcribe_audio_file # Yerel servisimizi içeri aktarıyoruz
+import shutil
 
-# -----------------------------------------------------------
-# 1. ORTAM HAZIRLIĞI VE API ANAHTARI
-# -----------------------------------------------------------
+# Senin whisper dosyanı çağırıyoruz (Klasör adın 'transcription' ise)
+from transcription.whisper import transcribe_file
+# Yeni yazdığımız diarization dosyasını çağırıyoruz
+from transcription.diarization.diarization import get_diarization_segments
 
-# .env dosyasındaki ortam değişkenlerini yükle (OPENAI_API_KEY vb.)
-load_dotenv() 
+app = FastAPI(title="Akıllı Not Asistanı API")
 
-# (Eğer API'ye geçerseniz kullanmak için hazır: client = OpenAI()) 
-
-# Geçici dosyaların kaydedileceği klasör
-TEMP_DIR = "temp_uploads"
-os.makedirs(TEMP_DIR, exist_ok=True) # Klasör yoksa oluştur
-
-app = FastAPI(
-    title="Akıllı Not Asistanı Backend",
-    description="STT (Whisper) ve RAG servislerini barındırır."
+# CORS Ayarları
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# -----------------------------------------------------------
-# 2. TRANSKRİPSİYON API UÇ NOKTASI (/transcribe)
-# -----------------------------------------------------------
+# --- BİRLEŞTİRME MANTIĞI (Whisper + Diarization) ---
+def merge_whisper_and_diarization(whisper_result, diarization_segments):
+    """
+    Whisper'dan gelen metin ile Pyannote'dan gelen konuşmacı bilgisini eşleştirir.
+    """
+    final_output = []
+    
+    # Senin whisper.py dict dönüyor {'segments': [...]}
+    w_segments = whisper_result.get('segments', [])
 
-@app.post("/transcribe/")
-async def handle_transcribe(file: UploadFile = File(...)):
-    """
-    Yüklenen ses dosyasını alır, yerel Whisper modeli ile metne çevirir.
-    """
-    
-    # Dosyanın kaydedileceği yol
-    file_location = os.path.join(TEMP_DIR, file.filename)
-    
-    # 1. Ses Dosyasını Kaydetme
-    try:
-        # Yüklenen dosyayı okuyup sunucudaki geçici bir konuma yaz
-        with open(file_location, "wb+") as file_object:
-            file_object.write(await file.read())
+    for w_seg in w_segments:
+        w_start = w_seg['start']
+        w_end = w_seg['end']
+        w_text = w_seg['text']
+        
+        # Bu segmentin süresi boyunca en çok kim konuşmuş?
+        speaker_counts = {}
+        
+        for d_seg in diarization_segments:
+            # Çakışma süresini hesapla (Intersection)
+            start_overlap = max(w_start, d_seg['start'])
+            end_overlap = min(w_end, d_seg['end'])
+            duration = end_overlap - start_overlap
             
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dosya kaydetme hatası: {e}")
+            if duration > 0:
+                speaker = d_seg['speaker']
+                speaker_counts[speaker] = speaker_counts.get(speaker, 0) + duration
+        
+        # En baskın konuşmacıyı seç
+        if speaker_counts:
+            best_speaker = max(speaker_counts, key=speaker_counts.get)
+        else:
+            best_speaker = "Unknown" # Eşleşme yoksa
 
-    # 2. Transkripsiyon Servisini Çağırma
+        final_output.append({
+            "start": w_start,
+            "end": w_end,
+            "speaker": best_speaker,
+            "text": w_text.strip()
+        })
+        
+    return final_output
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.post("/api/transcribe")
+async def transcribe_endpoint(
+    file: UploadFile = File(...),
+    lang: str = "tr"
+):
+    # Desteklenen format kontrolü
+    allowed = {
+        "audio/wav","audio/x-wav","audio/mpeg","audio/mp3",
+        "audio/webm","audio/ogg","audio/x-m4a","audio/mp4","video/mp4"
+    }
+    if file.content_type not in allowed:
+        print(f"Uyarı: Farklı format geldi: {file.content_type}")
+        # İstersen burada hata fırlatabilirsin ama ffmpeg genelde çözer.
+
+    # Geçici dosya oluştur
+    suffix = os.path.splitext(file.filename or "")[1] or ".tmp"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
     try:
-        # Transkripsiyon servisimizi çağırıyoruz
-        transcribed_text = transcribe_audio_file(file_location)
+        # 1. ADIM: Whisper ile Metne Çevir
+        print(f"1/3 Whisper çalışıyor... Dosya: {tmp_path}")
+        whisper_result = transcribe_file(tmp_path, lang=lang)
         
-        if transcribed_text.startswith("ERROR:"):
-            # transcription_service'den bir hata döndüyse
-            raise HTTPException(status_code=500, detail=f"Transkripsiyon Servis Hatası: {transcribed_text}")
-
-        # 3. Başarılı Sonucu Döndürme
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "transcription": transcribed_text,
-            "message": "Ses metne başarıyla çevrildi. Metin RAG için hazır."
-        }
-
-    except HTTPException as e:
-        # HTTP hatalarını yakala
-        raise e
+        # 2. ADIM: Diarization ile Konuşmacıları Bul
+        print("2/3 Diarization çalışıyor...")
+        diarization_segments = get_diarization_segments(tmp_path)
         
+        # 3. ADIM: Sonuçları Birleştir
+        print("3/3 Sonuçlar birleştiriliyor...")
+        final_response = merge_whisper_and_diarization(whisper_result, diarization_segments)
+        
+        return {"segments": final_response}
+
     except Exception as e:
-        # Diğer beklenmedik hataları yakala
-        raise HTTPException(status_code=500, detail=f"Beklenmeyen backend hatası: {e}")
-        
+        print(f"HATA OLUŞTU: {str(e)}")
+        raise HTTPException(500, f"İşlem hatası: {str(e)}")
+    
     finally:
-        # 4. Geçici Dosyayı Silme
-        if os.path.exists(file_location):
-            os.remove(file_location)
-            print(f"Geçici dosya silindi: {file_location}")
+        # Temizlik: Dosyayı sil
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
 
-# -----------------------------------------------------------
-# 3. RAG SORGULAMA API UÇ NOKTASI (/query) (İleride Eklenecek)
-# -----------------------------------------------------------
-
-# @app.post("/query/")
-# async def handle_query(query: str):
-#     # 1. Query'yi rag_service'e gönder
-#     # 2. Vektör DB'de arama yap ve bağlamı getir
-#     # 3. LLM'e (GPT/Diğer) gönder ve cevabı al
-#     # 4. Cevabı döndür
-#     pass # Kodu buraya ekleyeceksiniz.
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0git reset --soft HEAD~1.0.0.0", port=8000, reload=True)
