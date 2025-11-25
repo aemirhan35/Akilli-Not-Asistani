@@ -1,120 +1,90 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import tempfile
 import os
-import shutil
+import torch
+from pyannote.audio import Pipeline
+from faster_whisper import WhisperModel
+import numpy as np
 
-# Senin whisper dosyanı çağırıyoruz (Klasör adın 'transcription' ise)
-from transcription.whisper import transcribe_file
-# Yeni yazdığımız diarization dosyasını çağırıyoruz
-from transcription.diarization.diarization import get_diarization_segments
+# import os
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-app = FastAPI(title="Akıllı Not Asistanı API")
+# Ses dosyası yolu
+AUDIO_FILE = "backend/sample/ses_dosyasi.ogg"
 
-# CORS Ayarları
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Whisper Model Boyutu (tiny, base, small, medium, large-v2)
+MODEL_SIZE = "medium"  # İyi sonuç için medium veya large öneririm
 
-# --- BİRLEŞTİRME MANTIĞI (Whisper + Diarization) ---
-def merge_whisper_and_diarization(whisper_result, diarization_segments):
-    """
-    Whisper'dan gelen metin ile Pyannote'dan gelen konuşmacı bilgisini eşleştirir.
-    """
-    final_output = []
-    
-    # Senin whisper.py dict dönüyor {'segments': [...]}
-    w_segments = whisper_result.get('segments', [])
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"--- Sistem: {device} kullanılıyor ---")
 
-    for w_seg in w_segments:
-        w_start = w_seg['start']
-        w_end = w_seg['end']
-        w_text = w_seg['text']
-        
-        # Bu segmentin süresi boyunca en çok kim konuşmuş?
-        speaker_counts = {}
-        
-        for d_seg in diarization_segments:
-            # Çakışma süresini hesapla (Intersection)
-            start_overlap = max(w_start, d_seg['start'])
-            end_overlap = min(w_end, d_seg['end'])
-            duration = end_overlap - start_overlap
-            
-            if duration > 0:
-                speaker = d_seg['speaker']
-                speaker_counts[speaker] = speaker_counts.get(speaker, 0) + duration
-        
-        # En baskın konuşmacıyı seç
-        if speaker_counts:
-            best_speaker = max(speaker_counts, key=speaker_counts.get)
-        else:
-            best_speaker = "Unknown" # Eşleşme yoksa
-
-        final_output.append({
-            "start": w_start,
-            "end": w_end,
-            "speaker": best_speaker,
-            "text": w_text.strip()
-        })
-        
-    return final_output
-
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.post("/api/transcribe")
-async def transcribe_endpoint(
-    file: UploadFile = File(...),
-    lang: str = "tr"
-):
-    # Desteklenen format kontrolü
-    allowed = {
-        "audio/wav","audio/x-wav","audio/mpeg","audio/mp3",
-        "audio/webm","audio/ogg","audio/x-m4a","audio/mp4","video/mp4"
-    }
-    if file.content_type not in allowed:
-        print(f"Uyarı: Farklı format geldi: {file.content_type}")
-        # İstersen burada hata fırlatabilirsin ama ffmpeg genelde çözer.
-
-    # Geçici dosya oluştur
-    suffix = os.path.splitext(file.filename or "")[1] or ".tmp"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
-
+    # 1. WHISPER İLE YAZIYA DÖKME (TRANSCRIPTION)
+    print("\n1. Whisper çalışıyor (Metin çıkarılıyor)...")
     try:
-        # 1. ADIM: Whisper ile Metne Çevir
-        print(f"1/3 Whisper çalışıyor... Dosya: {tmp_path}")
-        whisper_result = transcribe_file(tmp_path, lang=lang)
-        
-        # 2. ADIM: Diarization ile Konuşmacıları Bul
-        print("2/3 Diarization çalışıyor...")
-        diarization_segments = get_diarization_segments(tmp_path)
-        
-        # 3. ADIM: Sonuçları Birleştir
-        print("3/3 Sonuçlar birleştiriliyor...")
-        final_response = merge_whisper_and_diarization(whisper_result, diarization_segments)
-        
-        return {"segments": final_response}
+        # compute_type="float16" GPU için, hata verirse "int8" yap
+        model = WhisperModel(MODEL_SIZE, device=device, compute_type="float16")
+    except:
+        print("GPU float16 desteklemiyor olabilir, int8 deneniyor...")
+        model = WhisperModel(MODEL_SIZE, device=device, compute_type="int8")
 
-    except Exception as e:
-        print(f"HATA OLUŞTU: {str(e)}")
-        raise HTTPException(500, f"İşlem hatası: {str(e)}")
+    segments, info = model.transcribe(AUDIO_FILE, beam_size=5, language="tr")
     
-    finally:
-        # Temizlik: Dosyayı sil
-        try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            pass
+    # Whisper segmentlerini listeye çevirelim (çünkü generator dönüyor)
+    whisper_segments = list(segments)
+    print(f"   -> Toplam {len(whisper_segments)} cümle bulundu.")
+
+    # 2. PYANNOTE İLE KONUŞMACI AYRIMI (DIARIZATION)
+    print("\n2. Pyannote çalışıyor (Konuşmacılar ayrılıyor)...")
+    try:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.0",
+            use_auth_token=HF_TOKEN
+        ).to(torch.device(device))
+        
+        diarization = pipeline(AUDIO_FILE)
+    except Exception as e:
+        print(f"HATA: Pyannote çalıştırılamadı. {e}")
+        return
+
+    # 3. BİRLEŞTİRME (MAPPING)
+    print("\n3. Metin ve Konuşmacılar eşleştiriliyor...\n")
+    print("-" * 50)
+    
+    # Pyannote sonuçlarını işlenebilir hale getir
+    diarization_list = list(diarization.itertracks(yield_label=True))
+
+    for segment in whisper_segments:
+        start_time = segment.start
+        end_time = segment.end
+        text = segment.text
+
+        # Bu cümle aralığında (start-end) en çok kim konuştu?
+        # Basit bir sayaç mantığı:
+        speakers_counter = {}
+        
+        for turn, _, speaker in diarization_list:
+            # Kesişim var mı?
+            # turn.start ile turn.end aralığı, bizim cümle aralığına giriyor mu?
+            intersection_start = max(start_time, turn.start)
+            intersection_end = min(end_time, turn.end)
+            
+            if intersection_end > intersection_start:
+                duration = intersection_end - intersection_start
+                if speaker in speakers_counter:
+                    speakers_counter[speaker] += duration
+                else:
+                    speakers_counter[speaker] = duration
+
+        # En baskın konuşmacıyı bul
+        if speakers_counter:
+            best_speaker = max(speakers_counter, key=speakers_counter.get)
+        else:
+            best_speaker = "Bilinmiyor"
+
+        # SONUCU YAZDIR
+        print(f"[{start_time:.1f}s - {end_time:.1f}s] {best_speaker}: {text}")
+
+    print("-" * 50)
+    print("İşlem Tamamlandı! 🚀")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0git reset --soft HEAD~1.0.0.0", port=8000, reload=True)
+    main()
