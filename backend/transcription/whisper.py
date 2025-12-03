@@ -37,8 +37,10 @@ except Exception:
 # -------------------------------
 DEFAULT_MODEL = os.getenv("WHISPER_MODEL_NAME", "small")
 DEFAULT_DEVICE = os.getenv("DEVICE", "cpu")
+
 # İşlemci uyumluluğu için int8 yapıyoruz
 DEFAULT_COMPUTE = "int8"
+
 
 
 def _which(cmd: str) -> Optional[str]:
@@ -82,7 +84,6 @@ def _convert_to_wav_16k_mono(src_path: str) -> str:
                     "veya pydub kurun: pip install pydub"
                 )
         return tmp_out_path
-# naber bende dert yok tasayok sende keyfin çok bir de ben güllimi seviyorum
     # ffmpeg yoksa pydub dene
     if _HAS_PYDUB:
         return _convert_with_pydub(src_path, tmp_out_path)
