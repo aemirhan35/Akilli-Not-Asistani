@@ -1,126 +1,108 @@
-
 import os
+import torch
+import torchaudio
 import sys
+from pyannote.audio import Pipeline
+from faster_whisper import WhisperModel
+from dotenv import load_dotenv
 
-# --- KRİTİK DÜZELTME: NVIDIA KÜTÜPHANE YOLLARINI EKLEME ---
-# Windows'ta 'cudnn_ops64_9.dll not found' hatasını çözmek için:
-# Sanal ortamdaki nvidia klasörlerini PATH'e ekliyoruz.
+# .env yükle
+load_dotenv()
+
+# --- AYARLAR ---
+HF_TOKEN = os.getenv("HF_TOKEN")
+AUDIO_FILE = "" # Bu GUI tarafından doldurulacak
+MODEL_SIZE = "medium"
+
+# Windows için NVIDIA yollarını ekle
 def add_nvidia_paths():
     try:
-        venv_base = os.path.dirname(os.path.dirname(sys.executable)) # .venv klasörü
+        venv_base = os.path.dirname(os.path.dirname(sys.executable))
         nvidia_path = os.path.join(venv_base, "Lib", "site-packages", "nvidia")
-        
         if os.path.exists(nvidia_path):
             for root, dirs, files in os.walk(nvidia_path):
                 if "bin" in dirs:
                     bin_path = os.path.join(root, "bin")
                     os.environ["PATH"] = bin_path + os.pathsep + os.environ["PATH"]
-                    # DLL'leri manuel yüklemeyi deniyoruz (Garanti olsun)
                     if hasattr(os, 'add_dll_directory'):
                         os.add_dll_directory(bin_path)
-    except Exception as e:
-        print(f"⚠️ Uyarı: NVIDIA yolları eklenirken hata: {e}")
+    except:
+        pass
 
-# Fonksiyonu çalıştır
 add_nvidia_paths()
-# -----------------------------------------------------------
-
-import torch
-import torchaudio
-from pyannote.audio import Pipeline
-from faster_whisper import WhisperModel
-from dotenv import load_dotenv
-
-# .env dosyasını yükle
-load_dotenv()
-
-# --- AYARLAR ---
-HF_TOKEN = os.getenv("HF_TOKEN")
-# HF_TOKEN = "hf_SeninUzunTokenKodunBuraya" # Eğer .env yoksa burayı aç
-
-AUDIO_FILE = "backend/sample/ses_dosyasi.ogg"
-MODEL_SIZE = "medium" 
 
 def main():
-    print("🚀 AKILLI NOT ASİSTANI BAŞLATILIYOR...\n")
+    print("🚀 AKILLI NOT ASİSTANI (HASSAS LOKAL MOD) BAŞLATILIYOR...\n")
 
     if not os.path.exists(AUDIO_FILE):
         print(f"❌ HATA: '{AUDIO_FILE}' dosyası bulunamadı!")
-        return
+        return None
 
-    # 1. WHISPER (SESİ YAZIYA DÖKME)
-    print("📝 1. Aşama: Whisper ile metin çıkarılıyor...")
-    
+    # --- 1. WHISPER (METİN) ---
+    print("📝 1. Aşama: Whisper ile kelime kelime döküm alınıyor...")
     whisper_segments = []
     
     try:
-        # GPU var mı kontrol et
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
-        
         print(f"   -> Cihaz: {device} modunda çalışıyor...")
         
-        # Modeli yükle
+        # 'large-v2' modeli daha iyi ayırır ama yavaştır. Hız istersen 'medium' kalsın.
         model = WhisperModel(MODEL_SIZE, device=device, compute_type=compute_type)
         
-        # Transcribe
+        # word_timestamps=True -> İşte bu salise ayarı için şart
         segments, info = model.transcribe(AUDIO_FILE, beam_size=5, language="tr", word_timestamps=True)
-        
         whisper_segments = list(segments)
-        print(f"   ✅ Metin başarıyla çıkarıldı! (Dil: {info.language})")
+        print(f"   ✅ Metin çıkarıldı! (Dil: {info.language})")
 
     except Exception as e:
         print(f"❌ Whisper Hatası: {e}")
-        return
+        return None
 
-    # 2. PYANNOTE (KONUŞMACI AYRIŞTIRMA)
-    print("\n🗣️  2. Aşama: Konuşmacılar analiz ediliyor (Pyannote)...")
+    # --- 2. PYANNOTE (KONUŞMACI AYRIMI - HASSAS AYARLI) ---
+    print("\n🗣️  2. Aşama: Konuşmacılar salise hassasiyetiyle aranıyor...")
     diarization_result = None
 
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN).to(device)
         
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=HF_TOKEN
-        ).to(device)
-        
-        # Manuel yükleme (AudioDecoder hatası için)
         waveform, sample_rate = torchaudio.load(AUDIO_FILE)
         
-        print("   -> Analiz yapılıyor (Ses uzunluğuna göre bekletir)...")
-        output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+        # --- İŞTE BURASI ÖNEMLİ REİS ---
+        # min_speakers=1, max_speakers=5 vererek modele "Bak burada kalabalık olabilir" diyoruz.
+        # Bu sayede 3. kişiyi yutmaz.
+        print("   -> Derin analiz yapılıyor (3-5 kişi olabilir)...")
+        
+        # Sözlük formatında veriyoruz ama parametreleri de ekliyoruz
+        inputs = {"waveform": waveform, "sample_rate": sample_rate}
+        
+        # Çağırırken min/max parametrelerini basıyoruz
+        output = pipeline(inputs, min_speakers=1, max_speakers=3)
 
-        # Kutu açma
-        if hasattr(output, "speaker_diarization"):
-             diarization_result = output.speaker_diarization
-        elif hasattr(output, "annotation"):
-             diarization_result = output.annotation
-        elif isinstance(output, tuple):
-             diarization_result = output[0]
-        else:
-             diarization_result = output
+        if hasattr(output, "speaker_diarization"): diarization_result = output.speaker_diarization
+        elif hasattr(output, "annotation"): diarization_result = output.annotation
+        elif isinstance(output, tuple): diarization_result = output[0]
+        else: diarization_result = output
              
-        print("   ✅ Konuşmacılar başarıyla ayrıştırıldı!")
+        print("   ✅ Konuşmacı zaman çizelgesi çıkarıldı!")
 
     except Exception as e:
         print(f"❌ Pyannote Hatası: {e}")
-        return
+        return None
 
-    # 3. BİRLEŞTİRME
-    print("\n🔗 3. Aşama: Metin ve Kişiler Eşleştiriliyor...\n")
-    print("=" * 60)
+    # --- 3. BİRLEŞTİRME (SALİSE HASSASİYETİ) ---
+    print("\n🔗 3. Aşama: Kelimeler ve Kişiler Eşleştiriliyor...\n")
     
     diarization_data = list(diarization_result.itertracks(yield_label=True))
-
     current_speaker = None
     current_sentence = []
     current_start_time = 0.0
+    
+    final_output_text = ""
 
     for segment in whisper_segments:
-        if not segment.words:
-            continue
-            
+        if not segment.words: continue
         for word in segment.words:
             word_start = word.start
             word_end = word.end
@@ -129,19 +111,27 @@ def main():
             best_speaker = "Bilinmiyor"
             max_overlap = 0
 
+            # Salise hesabı yaparak en doğru konuşmacıyı bul
             for turn, _, speaker in diarization_data:
                 intersection_start = max(word_start, turn.start)
                 intersection_end = min(word_end, turn.end)
                 
+                # Eğer kesişim varsa
                 if intersection_end > intersection_start:
                     overlap = intersection_end - intersection_start
                     if overlap > max_overlap:
                         max_overlap = overlap
                         best_speaker = speaker
 
+            # Konuşmacı değişti mi?
             if current_speaker is not None and best_speaker != current_speaker:
                 full_sentence = " ".join(current_sentence)
-                print(f"[{current_start_time:.1f}s] {current_speaker}: {full_sentence}")
+                
+                # REİS DİKKAT: :.2f yaparak salise hassasiyetini açtık (örn: 0.53s)
+                line = f"[{current_start_time:.2f}s] {current_speaker}: {full_sentence}"
+                
+                print(line)
+                final_output_text += line + "\n"
                 
                 current_sentence = [word_text]
                 current_speaker = best_speaker
@@ -152,12 +142,17 @@ def main():
                     current_start_time = word_start
                 current_sentence.append(word_text)
 
+    # Kalan son cümleyi yazdır
     if current_sentence:
         full_sentence = " ".join(current_sentence)
-        print(f"[{current_start_time:.1f}s] {current_speaker}: {full_sentence}")
+        line = f"[{current_start_time:.2f}s] {current_speaker}: {full_sentence}"
+        print(line)
+        final_output_text += line + "\n"
 
     print("=" * 60)
-    print("✅ İŞLEM TAMAMLANDI REİS!")
+    print("✅ İŞLEM TAMAMLANDI!")
+    
+    return final_output_text
 
 if __name__ == "__main__":
     main()
