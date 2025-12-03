@@ -1,37 +1,67 @@
-import torch
-from pyannote.audio import Pipeline
 import os
-HF_TOKEN = os.getenv("HF_TOKEN")
+import torch
+import torchaudio
+from pyannote.audio import Pipeline
+from dotenv import load_dotenv
 
-# Dosya yolun (bunu elleme, doğruydu)
-AUDIO_FILE = "backend/sample/ses_dosyasi.ogg" 
+# .env dosyasini yukle
+load_dotenv()
+
+# --- AYARLAR ---
+HF_TOKEN = os.getenv("HF_TOKEN")
+# Eger .env calismazsa tokeni asagidaki tirnak icine yaz:
+# HF_TOKEN = "hf_SeninTokenKodun"
+
+AUDIO_FILE = "backend/sample/ses_dosyasi.ogg"
 
 def run_diarization():
-    # GPU kontrolü
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Cihaz kullanılıyor: {device}")
+    print("🚀 Islem baslatiliyor...")
 
+    # 1. DOSYA KONTROLU
+    if not os.path.exists(AUDIO_FILE):
+        print(f"❌ HATA: '{AUDIO_FILE}' dosyasi bulunamadi! Yolunu kontrol et.")
+        return
+
+    # 2. CIHAZ KONTROLU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🖥️ Cihaz kullaniliyor: {device}")
+
+    # 3. MODELI YUKLE
     try:
-        print("Model yükleniyor (Token elle girildi)...")
+        print("⏳ Model yukleniyor (biraz surer)...")
         pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.0",
-            use_auth_token=HF_TOKEN 
+            "pyannote/speaker-diarization-3.1",
+            token=HF_TOKEN 
         ).to(device)
     except Exception as e:
-        print(f"\n--- HATA: {e}")
+        print(f"\n❌ MODEL YUKLEME HATASI: {e}")
         return
 
-    print("Diarization başladı...")
+    print("✅ Model hazir! Ses analizi basliyor...")
     
     try:
-        diarization = pipeline(AUDIO_FILE)
-    except Exception as e:
-        print(f"İşlem hatası: {e}")
-        return
+        # 4. SESI MANUEL YUKLEME
+        waveform, sample_rate = torchaudio.load(AUDIO_FILE)
+        
+        # Sesi modele veriyoruz
+        output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
 
-    print("\n--- SONUÇLAR ---")
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        print(f"Zaman: {turn.start:.1f}s - {turn.end:.1f}s | Konuşmacı: {speaker}")
+        # 5. SONUCU ALMA (Sorunu Çözen Yer Burası!)
+        # Senin attigin listeye gore veri 'speaker_diarization' icinde.
+        diarization = output.speaker_diarization
+
+        print("\n📝 --- SONUCLAR ---")
+        # Sonuçları ekrana yazdır
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            print(f"⏱️ Zaman: {turn.start:.1f}s - {turn.end:.1f}s --> {speaker}")
+            
+        print("\n✅ ISLEM BAŞARIYLA TAMAMLANDI REIS!")
+
+    except AttributeError:
+        print("\n⚠️ Hata: Sonuc formatı yine farkli geldi.")
+        print(f"Gelen veri: {output}")
+    except Exception as e:
+        print(f"\n❌ Islem sirasinda hata: {e}")
 
 if __name__ == "__main__":
     run_diarization()
